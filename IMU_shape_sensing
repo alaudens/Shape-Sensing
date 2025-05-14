@@ -1,0 +1,550 @@
+%% MAIN FILE: Get All Data Needed for plotShape.m from CSV with IMU data
+
+clear
+
+%% inputs (update before each run) 
+FILENAME = "rubble9.csv"; % CSV file to read vectors from
+TIMEPOINT_straight = 1389617; % timepoint when robot is straight
+TIMEPOINT_curve = 736474; % timepoint when robot is curved
+BANDIDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]; % IMU band IDs from base to tip
+w = 8*2/pi; % vine diameter in inches
+s = repmat(4, 1, numel(BANDIDS)); % sensor spacing (inches)
+
+%% extract desired data
+data = readtable(FILENAME);
+data = data{:,1:15};
+[timestamps, index_straight, index_curve, band_data, quat_data, sys] = ...
+            extractData(data, TIMEPOINT_straight, TIMEPOINT_curve);
+
+%% compute xyz_matrix_rotated
+% xyz_matrix_rotated is a set of vectors point in the direction of each IMU  
+[xyz_matrix_rotated, BANDIDS, s] = ...
+        xyzMatRotated2(BANDIDS, s, index_straight, index_curve, band_data, quat_data, sys);
+
+%% compute passive steering model for x, y, z vectors
+[allpoints_x_vect_passive, allpoints_y_vect_passive, allpoints_z_vect_passive] = ...
+        calcGeom3DPassive1(xyz_matrix_rotated, w, s);
+
+%% compute circular arc model for x, y, z vectors
+[allpoints_x_vect_circular, allpoints_y_vect_circular, allpoints_z_vect_circular] = ...
+         calcGeom3DCircularArc(xyz_matrix_rotated, w, s);
+
+%% GETTING GROUND TRUTH FROM 2D IMAGE (not necessary if using 3D PhaseSpace data) %%
+
+% Variables
+FILENAME = "18IMU_bend_angle2_90.png";
+INCHES = 1; % Scale factor for pixel-to-inch conversion
+
+% Read in the image
+figure
+pic = imread(FILENAME);
+
+% Click two reference points for distance and angle calibration
+[x_calib, y_calib, ~] = impixel(pic);
+pixel_dist = norm([x_calib(1), y_calib(1)] - [x_calib(2), y_calib(2)]);
+
+% Click robot body points (each IMU + in-between points)
+[x_data, y_data, ~] = impixel(pic);
+% Calculate angle between image x-axis and maze x-axis
+dir_x = x_data(2)-x_data(1);
+dir_y = y_data(2)-y_data(1);
+dir_vec = [dir_x, dir_y];
+ref_vec = [1, 0];
+theta = acos(dot(dir_vec,ref_vec)/(norm(dir_vec)*norm(ref_vec)));
+if y_data(2)-y_data(1) > 0
+    theta = -theta; % Angle should be negative if clockwise rotation
+end
+
+% Shift all points so first IMU is at (0,0)
+x_data_shifted = (x_data - x_data(1))*INCHES/pixel_dist;
+y_data_shifted = -(y_data - y_data(1))*INCHES/pixel_dist;
+
+% Rotate data (so that data is plotted relative to maze x-axis)
+x_data_rotated = zeros([1,length(x_data_shifted)]);
+y_data_rotated = zeros([1,length(y_data_shifted)]);
+for i = 1:length(x_data_shifted)
+    mag = norm([x_data_shifted(i), y_data_shifted(i)]);
+    angle = atan2(y_data_shifted(i),x_data_shifted(i));
+    new_angle = angle - theta;
+    x_data_rotated(i) = mag*cos(new_angle);
+    y_data_rotated(i) = mag*sin(new_angle);
+end
+
+length_cl = 0;
+for i = 2:length(x_data_rotated)
+    length_cl = length_cl + sqrt((x_data_rotated(i)-x_data_rotated(i-1))^2+(y_data_rotated(i)-y_data_rotated(i-1))^2);
+end
+
+% Plot robot shape
+figure
+hold on
+xlabel('x position (inches)')
+ylabel('y position (inches)')
+plot(x_data_rotated, y_data_rotated, 'r-o', 'LineWidth', 2)
+title('Ground Truth Robot Shape (Aligned to X-axis)')
+axis equal
+save('imageDataNew.mat', 'x_data_rotated', 'y_data_rotated')
+
+%% PLOTTING GROUND TRUTH AND IMU ESTIMATE %% 
+
+%% Plots ground truth and shape estimates on the same graph
+load('imageDataNew.mat') % x_data_rotated, y_data_rotated (ground truth) (ONLY NEED THIS IF USING 2D PHOTO AS GROUND TRUTH)
+load('vector3Ddata_passive.mat') % allpoints_x_vect_passive, allpoints_y_vect_passive, 
+% allpoints_z_vect_passive, IMU_x_passive, IMU_y_passive, IMU_z_passive (passive steering estimate)
+load('vector3Ddata_circular.mat') % allpoints_x_vect_circular, allpoints_y_vect_circular, 
+% allpoints_z_vect_circular, IMU_x_circ, IMU_y_circ, IMU_z_circ (circular arc estimate)
+tip_end_phase = [43.0434   -5.7694    2.5896]; (USE THIS IF YOU HAVE A TIP POSITION FROM PHASESPACE)
+
+% Calculate total length of each curve
+% From passive vector
+robot_length_vector_passive = 0;
+for i = 1:(length(allpoints_x_vect_passive)-1)
+    robot_length_vector_passive = robot_length_vector_passive + norm([allpoints_x_vect_passive(i+1), allpoints_y_vect_passive(i+1)]-...
+    [allpoints_x_vect_passive(i), allpoints_y_vect_passive(i)]);
+end
+% From circular vector
+robot_length_vector_circular = 0;
+for i = 1:(length(allpoints_x_vect_circular)-1)
+    robot_length_vector_circular = robot_length_vector_circular + norm([allpoints_x_vect_circular(i+1), allpoints_y_vect_circular(i+1)]-...
+    [allpoints_x_vect_circular(i), allpoints_y_vect_circular(i)]);
+end
+
+% Calculate error between ground truth and estimates of tip position (2D)
+% error_passive = sqrt((allpoints_y_vect_passive(end)-y_data_rotated(end))^2 + (allpoints_x_vect_passive(end)-x_data_rotated(end))^2);
+% error_circular = sqrt((allpoints_y_vect_circular(end)-y_data_rotated(end))^2 + (allpoints_x_vect_circular(end)-x_data_rotated(end))^2);
+
+% Calculate error between ground truth and estimates of tip position (3D)
+error_passive = sqrt((allpoints_y_vect_passive(end)-tip_end_phase(2))^2 + (allpoints_x_vect_passive(end)-tip_end_phase(1))^2 + (allpoints_z_vect_passive(end)-tip_end_phase(3))^2);
+error_circular = sqrt((allpoints_y_vect_circular(end)-tip_end_phase(2))^2 + (allpoints_x_vect_circular(end)-tip_end_phase(1))^2 + (allpoints_z_vect_circular(end)-tip_end_phase(3))^2);
+
+% Plot robot shape
+figure
+hold on
+xlabel('z position (")')
+ylabel('y position (")')
+zlabel('z position (")')
+% plot(x_data_rotated, y_data_rotated, 'r-', 'LineWidth', 2.5) %  GROUND TRUTH, USE IF USING 2D IMAGE AS GROUND TRUTH
+% plot(x_data_rotated(1:2:end), y_data_rotated(1:2:end), 'ro', 'LineWidth', 2.5) % GROUND TRUTH IMU POSITIONS, USE IF USING 2D IMAGE AS GROUND TRUTH
+scatter3(tip_end_phase(1), tip_end_phase(2), tip_end_phase(3), 'r', 'LineWidth', 2); % USE THIS IF USING 3D TIP POSITON FROM PHASESPACE AS GROUND TRUTH
+%% passive steering data
+plot3(allpoints_x_vect_passive, allpoints_y_vect_passive, allpoints_z_vect_passive, 'b-', 'LineWidth', 2.5) % passive estimate
+plot3(imu_x_passive, imu_y_passive, imu_z_passive, 'bo', 'LineWidth', 2.5) % passive estimate IMUs
+%% circular arc data 
+plot3(allpoints_x_vect_circular, allpoints_y_vect_circular, allpoints_z_vect_circular,'g-', 'LineWidth', 2.5) % circular arc estimate
+plot3(imu_x_circ, imu_y_circ, imu_z_circ, 'go', 'LineWidth', 2.5) % circular arc IMUs
+
+legend('Ground Truth', 'Passive Steering Estimate', '', 'Circular Arc Estimate')
+str_passive = ['Passive Tip Estimate Error: ', num2str(error_passive), '"'];
+str_circular = ['Circular Arc Tip Estimate Error: ', num2str(error_circular),'"'];
+axis equal
+disp([str_passive])
+disp([str_circular])
+disp(["Circular Arc Length: ", num2str(robot_length_vector_circular)])
+disp(["Passive Length: ", num2str(robot_length_vector_passive)])
+
+
+%% ALL NECESSARY FUNCTIONS BELOW %%
+
+%% extract data function
+function [timestamps, index_straight, index_curve, band_data, quat_data, sys] = extractData(data, TIMEPOINT_straight, TIMEPOINT_curve)
+    timestamps = data(:,1);
+    [~, index_straight] = min(abs(timestamps-TIMEPOINT_straight)); % Find index of timepoint closest to straight-line
+    [~, index_curve] = min(abs(timestamps-TIMEPOINT_curve)); % Find index of timepoint closest to curved shape
+    band_data = data(:,2);
+
+    % data collection format 
+    w_data = data(:, 3); %UPDATE THESE DEPENDING WHERE QUATERNIONS ARE IN YOUR CSV
+    x_data = data(:, 4); %UPDATE THESE DEPENDING WHERE QUATERNIONS ARE IN YOUR CSV
+    y_data = data(:, 5); %UPDATE THESE DEPENDING WHERE QUATERNIONS ARE IN YOUR CSV
+    z_data = data(:, 6); %UPDATE THESE DEPENDING WHERE QUATERNIONS ARE IN YOUR CSV
+    quat_data = [w_data, x_data, y_data, z_data];
+    sys = data(:,11);
+end
+
+% xyzMatRotated2 function: finds the relative orientation between consecutive IMUs at the straight configuration,
+% the relative orientation between consecutive IMUs at the curved configuration, and then uses the straight configuration offset
+% to find the true orientation between consecutive IMUs. Also removes BANDIDS with invalid quaternion data
+function [xyz_matrix_rotated, BANDIDS, s] = xyzMatRotated2(BANDIDS, s, index_straight, index_curve, band_data, quat_data, sys)
+    %% REMOVE INVALID DATA
+    % Validate sensor data and adjust spacing for skipped sensors
+    valid_bandids = [];
+    valid_xyz_matrix_rotated = [];
+    adjusted_s = [];
+    s = s(1);
+    for i = 1:length(BANDIDS)
+        % Check if the vector is valid (all zeros or NaN means invalid data)
+        if all(quat_data(index_curve+i-1,:) == 0) || any(isnan(quat_data(index_curve,:)))
+            % fprintf('Band %d is invalid. Skipping.\n', BANDIDS(i));
+            continue;
+        end
+        % Append valid data
+        valid_bandids = [valid_bandids, BANDIDS(i)];
+        
+        % Adjust spacing for skipped bands
+        for j = 2:length(valid_bandids)
+            band_gap = valid_bandids(j) - valid_bandids(j-1);
+            adjusted_s(j-1) = s * band_gap;  % Ensure i-1 so we don't add extra value
+        end
+    end
+    
+    % Adjust spacing for skipped bands
+    for i = 2:length(valid_bandids)
+        band_gap = valid_bandids(i) - valid_bandids(i-1);
+        adjusted_s(i-1) = s * band_gap;
+    end
+
+    BANDIDS = valid_bandids;
+    s = adjusted_s;
+    
+    %fprintf('Valid bands: %s\n', mat2str(valid_bandids));
+    %fprintf('Adjusted spacing: %s\n', mat2str(adjusted_s));
+
+    %% COMPUTE XYZ_MATRIX_ROTATED
+    % Initialize variables
+    num_imus = length(BANDIDS);
+    ref_vec = [1, 0, 0]';
+    quats_straight = zeros(num_imus - 1, 4);
+    quats_curved = zeros(num_imus - 1, 4);
+    quats_corrected = zeros(num_imus - 1, 4);
+    xyz_matrix_rotated = zeros(3, num_imus);
+    axang_straight = zeros(num_imus - 1, 4);
+    axang_curved = zeros(num_imus - 1, 4);
+    axang_corrected = zeros(num_imus - 1, 4);
+    ang_corrected = zeros(num_imus - 1, 1);
+
+    % Compute quaternion of each IMU in the straight configuration
+    for i = 1:(num_imus)
+        quats_straight(i,:) = findQuat(BANDIDS(i), index_straight, band_data, quat_data);
+        axang_straight(i,:) = quat2axang(quats_straight(i,:));
+        axang_straight(i,4) = axang_straight(i,4)*180/pi;
+        ang_straight = axang_straight(i, 1:3)*axang_straight(i,4);
+    end
+
+
+     % Compute quaternion of each IMU in the curved configuration
+    for i = 1:(num_imus)
+        % Compute curved quaternion
+        quats_curved(i,:) = findQuat(BANDIDS(i), index_curve, band_data, quat_data);
+        axang_curved(i,:) = quat2axang(quats_curved(i,:));
+        axang_curved(i,4) = axang_curved(i,4)*180/pi;
+        ang_curved = axang_curved(i, 1:3)*axang_curved(i,4);
+    end
+
+    % offset curved quaternion by straight quaternion
+    for i = 1:(num_imus)
+        rel_quat_straight = quats_straight(i,:);
+        rel_quat_curved = quats_curved(i,:);
+
+        % compute corrected quaternion
+        quats_corrected(i,:) = quatmultiply(rel_quat_curved, quatinv(rel_quat_straight));
+        axang_corrected(i,:) = quat2axang(quats_corrected(i,:));
+        axang_corrected(i,4) = axang_corrected(i,4)*180/pi;
+        ang_corrected_temp = axang_corrected(i, 1:3)*axang_corrected(i,4);
+        ang_corrected(i) = ang_corrected_temp(3);
+    end
+
+    % convert from quaternions to reference vectors
+    xyz_matrix_rotated(:, 1) = ref_vec;  % Set first IMU to reference direction
+    cumulative_quat = [1, 0, 0, 0]; % Identity quaternion
+    for i = 1:(length(BANDIDS)-1)
+        cumulative_quat = quatmultiply(cumulative_quat, quatmultiply(quats_corrected(i+1,:),quatinv(quats_corrected(i,:))));
+        R = quat2rotm(cumulative_quat);
+        xyz_matrix_rotated(:, i+1) = R * ref_vec;
+    end
+end
+
+% Find quaternion for a given BANDID at a specific index
+function quat = findQuat(target_bandid, index, band_data, quat_data)
+    row = index;
+    while band_data(row) ~= target_bandid
+        row = row + 1;
+    end
+    quat = quatnormalize(quat_data(row, :));
+end
+
+% calcGeom3DPassive1 function: finds the location of each IMU and path between IMUs using the passive steering model - two straight segments
+% connected by an arc 
+function [allpoints_x_vect_passive, allpoints_y_vect_passive, allpoints_z_vect_passive] = calcGeom3DPassive1(xyz_matrix_rotated, w, s)
+    % Initialize empty arrays to hold points to plot
+    num_bands = length(xyz_matrix_rotated(1,:));
+    allpoints_x_vect = [0];
+    allpoints_y_vect = [0];
+    allpoints_z_vect = [0];
+
+    imu_x_passive = [0];
+    imu_y_passive = [0];
+    imu_z_passive = [0];
+
+    current_start_point = [0; 0; 0]; % Start from centerline of vine at first IMU position
+
+    for i = 2:num_bands % Loop through all vectors after the first
+
+        b_raw = 0.5; % Assume the bend happens halfway through the segment
+
+        start_direction = xyz_matrix_rotated(:,i-1); % Set new direction
+        end_direction = xyz_matrix_rotated(:,i);
+
+        % Calculate angle between current and previous vector
+        rotvec = computeRotationVector(start_direction, end_direction);
+        theta = rotvec(4);
+        axis = rotvec(1:3);
+
+        % Calculate amount of arc length used up for a bend of that angle
+        L_arc = abs(w/2 * theta); % Center line arc length
+        % Calculate length of straight segments on both sides of curve
+        b = (s(i-1) - L_arc) * b_raw;
+        
+        % fill in first straight segment
+        allpoints_x_vect = [allpoints_x_vect, allpoints_x_vect(end) + start_direction(1) * b];
+        allpoints_y_vect = [allpoints_y_vect, allpoints_y_vect(end) + start_direction(2) * b];
+        allpoints_z_vect = [allpoints_z_vect, allpoints_z_vect(end) + start_direction(3) * b];
+
+        % Compute start point for the bend
+        current_start_point = [allpoints_x_vect(end); allpoints_y_vect(end); allpoints_z_vect(end)];
+        
+        if L_arc ~= 0
+            % Generate arc points
+            arc_points = generateArc(current_start_point, w/2, theta, axis, start_direction);
+
+            % add arc points to allpoints_vects
+            allpoints_x_vect = [allpoints_x_vect, arc_points(1,:)];
+            allpoints_y_vect = [allpoints_y_vect, arc_points(2,:)];
+            allpoints_z_vect = [allpoints_z_vect, arc_points(3,:)];
+        end
+
+        % fill in second straight segment
+        allpoints_x_vect = [allpoints_x_vect, allpoints_x_vect(end) + b*end_direction(1)];
+        allpoints_y_vect = [allpoints_y_vect, allpoints_y_vect(end) + b*end_direction(2)];
+        allpoints_z_vect = [allpoints_z_vect, allpoints_z_vect(end) + b*end_direction(3)];
+
+        % Store new IMU position
+        imu_x_passive = [imu_x_passive, allpoints_x_vect(end)];
+        imu_y_passive = [imu_y_passive, allpoints_y_vect(end)];
+        imu_z_passive = [imu_z_passive, allpoints_z_vect(end)];
+        
+    end
+
+    allpoints_x_vect_passive = allpoints_x_vect;
+    allpoints_y_vect_passive = allpoints_y_vect;
+    allpoints_z_vect_passive = allpoints_z_vect;
+
+    % Debug: Save vectors for further analysis
+    save('vector3Ddata_passive.mat', 'allpoints_x_vect_passive', 'allpoints_y_vect_passive', 'allpoints_z_vect_passive', 'imu_x_passive', 'imu_y_passive', 'imu_z_passive');
+end
+
+function arc_points = generateArc(start_point, radius, theta, axis, start_direction)
+    % Number of interpolation steps for smoothness
+    num_steps = 50;
+
+    % Normalize rotation axis and start direction
+    axis = axis / norm(axis);
+    start_direction = start_direction / norm(start_direction);
+
+    % Compute center of rotation
+    center = start_point + radius * cross(axis, start_direction);
+
+    % Generate angles for interpolation
+    angle_step = linspace(0, theta, num_steps);
+
+    % Initialize arc points array
+    arc_points = zeros(3, num_steps);
+
+    for i = 1:num_steps
+        % Compute rotation matrix for current angle step
+        rot_mat = axang2rotm([axis(:)', angle_step(i)]);
+
+        % Rotate `start_point` around `center`
+        rotated_vec = rot_mat * (start_point - center);
+
+        % Compute arc point by translating back from the center
+        arc_points(:, i) = center + rotated_vec;
+    end
+
+    % Ensure first point is exactly `start_point`
+    arc_points(:, 1) = start_point;
+end
+
+% Function to find axis and angle between two direction vectors
+function [rot_vec] = computeRotationVector(vec1, vec2)
+    % Normalize input vectors
+    vec1 = vec1 / norm(vec1);
+    vec2 = vec2 / norm(vec2);
+
+    % Calculate the angle between the two vectors
+    angle = acos(dot(vec1, vec2));
+    
+    % Calculate the axis of rotation
+    axis = cross(vec1, vec2);
+    
+    % Check for cases where vectors are parallel or anti-parallel
+    if norm(axis) < 1e-6
+        % If vectors are parallel or anti-parallel
+        if dot(vec1, vec2) > 0
+            % Parallel vectors -> zero rotation
+            axis_x = 0;
+            axis_y = 0;
+            axis_z = 0;
+            angle = 0;
+        else
+            % Anti-parallel vectors -> 180-degree rotation
+            % Choose any perpendicular axis
+            perpendicular_axis = null(vec1');  % Perpendicular to vec1
+            axis = perpendicular_axis(:,1);
+            angle = pi; % 180 degrees in radians
+        end
+    else
+        % Normalize the rotation axis
+        axis = axis / norm(axis);
+    end
+
+    % Extract the axis components
+    axis_x = axis(1);
+    axis_y = axis(2);
+    axis_z = axis(3);
+    rot_vec = [axis_x; axis_y; axis_z; angle];
+end
+
+% calcGeom3DCircularArc: finds the position of each IMU and path between IMUs using the circular arc method. The arc length between IMUs 
+% is determined using a function found through data to determine the shrinkage of the center line between IMUs when the straight spacing 
+% between IMUs is 4". This function would need to be updated if the straight length between IMUs is changed. 
+function [allpoints_x_vect_circular, allpoints_y_vect_circular, allpoints_z_vect_circular] = calcGeom3DCircularArc(xyz_matrix_rotated, w, s)
+    % Initialize vectors to store interpolated points
+    allpoints_x_vect = [];
+    allpoints_y_vect = [];
+    allpoints_z_vect = [];
+    imu_x_circ = [0];
+    imu_y_circ = [0];
+    imu_z_circ = [0];
+    
+    current_start_point = [0; 0; 0]; % Start from centerline of vine at first IMU position
+    num_bands = size(xyz_matrix_rotated, 2);
+
+    % Iterate through IMUs
+    for i = 2:num_bands
+        start_direction = xyz_matrix_rotated(:,i-1); % Set new direction
+        end_direction = xyz_matrix_rotated(:,i);
+        % Compute rotation vector (axis + angle)
+        rotvec = computeRotationVector(start_direction, end_direction);
+        axis = rotvec(1:3);
+        theta = rotvec(4);
+
+        % Compute the arc radius to the outer edge
+        s_center = lengthAdjustment(s(i-1), theta);
+
+        if theta > 1e-4  % Avoid division by zero
+            r_center = s_center / theta;
+            % Generate a circular arc
+            arc_points = generateArc(current_start_point, r_center, theta, axis, start_direction);
+        else
+            arc_points = linspaceVectors(current_start_point, current_start_point+s_center*start_direction, 50);
+        end
+
+        % Store new IMU position
+        imu_x_circ = [imu_x_circ, arc_points(1,end)];
+        imu_y_circ = [imu_y_circ, arc_points(2,end)];
+        imu_z_circ = [imu_z_circ, arc_points(3,end)];
+
+        % Append arc points
+        allpoints_x_vect = [allpoints_x_vect, arc_points(1, :)];
+        allpoints_y_vect = [allpoints_y_vect, arc_points(2, :)];
+        allpoints_z_vect = [allpoints_z_vect, arc_points(3, :)];
+
+        % Update start point and direction for next iteration
+        current_start_point = arc_points(:,end);
+    end
+
+    % Output results
+    allpoints_x_vect_circular = allpoints_x_vect;
+    allpoints_y_vect_circular = allpoints_y_vect;
+    allpoints_z_vect_circular = allpoints_z_vect;
+
+    save('vector3Ddata_circular.mat', 'allpoints_x_vect_circular', 'allpoints_y_vect_circular', 'allpoints_z_vect_circular', 'imu_x_circ', 'imu_y_circ', 'imu_z_circ')
+end
+
+function arc_points = generateArc(start_point, radius, theta, axis, start_direction)
+    % Number of interpolation steps for smoothness
+    num_steps = 50;
+
+    % Normalize rotation axis and start direction
+    axis = axis / norm(axis);
+    start_direction = start_direction / norm(start_direction);
+
+    % Compute center of rotation
+    center = start_point + radius * cross(axis, start_direction);
+
+    % Generate angles for interpolation
+    angle_step = linspace(0, theta, num_steps);
+
+    % Initialize arc points array
+    arc_points = zeros(3, num_steps);
+
+    for i = 1:num_steps
+        % Compute rotation matrix for current angle step
+        rot_mat = axang2rotm([axis(:)', angle_step(i)]);
+
+        % Rotate `start_point` around `center`
+        rotated_vec = rot_mat * (start_point - center);
+
+        % Compute arc point by translating back from the center
+        arc_points(:, i) = center + rotated_vec;
+    end
+
+    % Ensure first point is exactly `start_point`
+    arc_points(:, 1) = start_point;
+end
+
+
+% Function to find axis and angle between two direction vectors
+function [rot_vec] = computeRotationVector(vec1, vec2)
+    % Normalize input vectors
+    vec1 = vec1 / norm(vec1);
+    vec2 = vec2 / norm(vec2);
+
+    % Calculate the angle between the two vectors
+    angle = acos(dot(vec1, vec2));
+    
+    % Calculate the axis of rotation
+    axis = cross(vec1, vec2);
+    
+    % Check for cases where vectors are parallel or anti-parallel
+    if norm(axis) < 1e-6
+        % If vectors are parallel or anti-parallel
+        if dot(vec1, vec2) > 0
+            % Parallel vectors -> zero rotation
+            axis_x = 0;
+            axis_y = 0;
+            axis_z = 0;
+            angle = 0;
+        else
+            % Anti-parallel vectors -> 180-degree rotation
+            % Choose any perpendicular axis
+            perpendicular_axis = null(vec1');  % Perpendicular to vec1
+            axis = perpendicular_axis(:,1);
+            angle = pi; % 180 degrees in radians
+        end
+    else
+        % Normalize the rotation axis
+        axis = axis / norm(axis);
+    end
+
+    % Extract the axis components
+    axis_x = axis(1);
+    axis_y = axis(2);
+    axis_z = axis(3);
+    rot_vec = [axis_x; axis_y; axis_z; angle];
+end
+
+function result = linspaceVectors(v1, v2, n)
+    % Generates n evenly spaced vectors between v1 and v2
+    % v1, v2 - Input vectors (same size)
+    % n - Number of points
+
+    steps = linspace(0, 1, n); % Create interpolation factors
+    result = v1 + steps .* (v2 - v1); % Element-wise interpolation
+end
+
+% function that determines length of center line between IMUs assuming the straight distance between IMUs is 4" 
+function s_new = lengthAdjustment(s, theta)
+    theta = rad2deg(theta);
+    s_new = 0.000192*theta^2 - 0.0322*theta + s + 0.5;
+end
